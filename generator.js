@@ -1,5 +1,4 @@
-// generator.js
-// Dynamic Playwright test generator based on testplan.md
+// generator.js - fully dynamic, UI-only, headed
 import fs from 'fs';
 import path from 'path';
 
@@ -10,8 +9,13 @@ function sanitizeFilename(s) {
   return s.replace(/[^a-z0-9\-]/gi, '_').toLowerCase().slice(0, 60);
 }
 
+function convertSelector(sel, desc) {
+  if (!sel) return `text=/${desc}/i`; // default locator if none provided
+  // convert old :text() to :has-text()
+  return sel.replace(/:text\(["']?(.*)["']?\)/, ':has-text("$1")');
+}
+
 function buildTestFile(baseUrl, candidateLines) {
-  // Build test steps dynamically from plan
   const steps = candidateLines.map((line, index) => {
     const m = line.match(/- Action \d+: (.*) -> (.*)/);
     if (!m) return '';
@@ -19,15 +23,14 @@ function buildTestFile(baseUrl, candidateLines) {
     const desc = m[1].trim();
     const href = m[2].trim();
 
-    // Use optional selector if defined
-    let locator = `text=/${desc}/i`;
-    const selMatch = line.match(/selector=(.*)$/);
-    if (selMatch) locator = selMatch[1].trim();
+    // check for selector= in line
+    const selMatch = line.match(/selector=(.+)$/);
+    const locator = convertSelector(selMatch ? selMatch[1].trim() : null, desc);
 
     return `
     // Action ${index + 1}: ${desc}
     const el${index} = page.locator('${locator}');
-    await expect(el${index}).toHaveCount(1);
+    await el${index}.waitFor({ state: 'visible', timeout: 5000 });
     await el${index}.click();
     await page.waitForLoadState('networkidle');
     ${href && href !== '/' ? `expect(page.url()).toBe('${href}');` : ''}
@@ -35,16 +38,12 @@ function buildTestFile(baseUrl, candidateLines) {
   }).join('\n');
 
   return `import { test, expect } from '@playwright/test';
-import { acceptCookieBanner } from '../utils/cookieHelper.js';
 
 const BASE = process.env.BASE_URL || '${baseUrl}';
 
-test.describe('Custom Journey - generated', () => {
+test.describe('Dynamic Journey - generated', () => {
   test('should execute all actions from plan', async ({ page }) => {
     await page.goto(BASE);
-
-    // Accept cookie banner if present
-    await acceptCookieBanner(page);
 
     ${steps}
   });
@@ -59,14 +58,12 @@ function main() {
   }
 
   const md = fs.readFileSync(PLAN, 'utf8');
-
-  // Get start URL from the first line
   const startUrlMatch = md.match(/- URL: (.*)/);
   const baseUrl = startUrlMatch ? startUrlMatch[1].trim() : process.env.BASE_URL || '';
 
   const lines = md.split('\n');
 
-  // Collect candidate action lines
+  // collect candidate action lines
   const startIndex = lines.findIndex(l => l.includes(baseUrl));
   const candidateLines = [];
   for (let i = startIndex; i < Math.min(lines.length, startIndex + 200); i++) {
@@ -76,7 +73,6 @@ function main() {
   }
 
   fs.mkdirSync(OUT_DIR, { recursive: true });
-
   const content = buildTestFile(baseUrl, candidateLines);
   const filename = 'journey_generated.spec.js';
   fs.writeFileSync(path.join(OUT_DIR, filename), content, 'utf8');
